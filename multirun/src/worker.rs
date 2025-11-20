@@ -11,7 +11,7 @@ use crate::utils::sanitize_filename;
 
 
 /// #panics when mutex is poisoned
-pub fn worker_function(queue: Arc<Mutex<VecDeque<String>>>, template: String) {
+pub fn worker_function(queue: Arc<Mutex<VecDeque<(usize,String)>>>, template: String) {
     loop {
 
         let task = queue
@@ -19,12 +19,13 @@ pub fn worker_function(queue: Arc<Mutex<VecDeque<String>>>, template: String) {
             .expect("Mutex poisoned while trying to acquire lock")
             .pop_front();
 
-        let path = match task {
+        let (index ,path) = match task {
             Some(l) => l,
             None => break,
         };
 
-        let output_filename = sanitize_filename(&path);
+        let output_filename = sanitize_filename(index);
+
         let cmd_final = template
             .replace("{}", &path)
             .replace("{out}", &output_filename);
@@ -57,9 +58,12 @@ pub fn worker_function(queue: Arc<Mutex<VecDeque<String>>>, template: String) {
     }
 }
 
+
+
+
 pub fn spawn_workers(
     count: usize,
-    queue: Arc<Mutex<VecDeque<String>>>,
+    queue: Arc<Mutex<VecDeque<(usize,String)>>>,
     template: String,
 ) -> Vec<JoinHandle<()>> {
     let mut handles = Vec::new();

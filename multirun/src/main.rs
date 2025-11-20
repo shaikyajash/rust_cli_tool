@@ -1,4 +1,4 @@
-use clap::{Parser};
+use clap::Parser;
 use std::{
     collections::VecDeque,
     io::{self, BufRead},
@@ -7,14 +7,43 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-/// Parallel CLI runner, similar to GNU parallel
+/// Run a command on multiple inputs in parallel, similar to GNU parallel.
+///
+/// The special placeholder `{}` is replaced with each input line.
+/// The optional `{out}` placeholder is replaced with a sanitized filename.
+///
+/// Example:
+///     seq 1 5 | multirun --workers 4 "echo processing {}"
+///
+/// Example with output filename:
+///     cat files.txt | multirun "gzip {} -c > {out}.gz"
 #[derive(Parser, Debug)]
+#[command(
+    name = "multirun",
+    version = "0.1",
+    about = "Tiny parallel command executor"
+)]
 struct Args {
-    /// Number of parallel jobs
+    /// Number of parallel workers to spawn.
     #[arg(long = "workers", default_value_t = 4)]
     workers: usize,
-    /// Command template, use {} for input and {out} for optional safe filename
+
+    /// Command template. Use `{}` as placeholder for each line of input.
+    ///
+    /// Example:  "echo processing {}"
+    #[arg(value_parser = non_empty_string)]
     template: String,
+}
+
+// validator function
+fn non_empty_string(val: &str) -> Result<String, String> {
+    if val.trim().is_empty() {
+        Err("template must be a non-empty string".to_string())
+    } else if !val.contains("{}") {
+        Err("template must contain {}".to_string())
+    } else {
+        Ok(val.to_string())
+    }
 }
 
 /// Sanitize a string to make a safe filename
@@ -25,28 +54,40 @@ fn sanitize_filename(input: &str) -> String {
         .collect()
 }
 
+/// #panics when mutex is poisoned
+/// #returns Result<>
 //  function to read all inputs
-fn read_inputs() -> Arc<Mutex<VecDeque<String>>> {
+fn read_inputs(template: &str) -> Result<Arc<Mutex<VecDeque<String>>>, io::Error> {
+    // If template needs input but stdin is a TTY, show help.
+    if template.contains("{}") && atty::is(atty::Stream::Stdin) {
+        eprintln!("No input detected on stdin.\nExample usage:");
+        eprintln!("  seq 1 5 | multirun \"echo {{}}\"");
+        eprintln!("  cat files.txt | multirun \"cp {{}} {{out}}\"");
+        return Err(io::Error::new(io::ErrorKind::Other, "no stdin"));
+    }
+
     let queue = Arc::new(Mutex::new(VecDeque::new()));
 
     let stdin = io::stdin();
 
     for paths in stdin.lock().lines() {
-        match paths {
-            Ok(l) => {
-                queue.lock().unwrap().push_back(l);
-            }
-            Err(e) => {
-                eprintln!("Error while reading the from buffer: {}", e)
-            }
-        }
+        let l = paths?;
+        queue
+            .lock()
+            .expect("Mutex poisoned while pushing input into queue")
+            .push_back(l);
     }
-    queue
+
+    Ok(queue)
 }
 
+/// #panics when mutex is poisoned
 fn worker_function(queue: Arc<Mutex<VecDeque<String>>>, template: String) {
     loop {
-        let task = queue.lock().unwrap().pop_front();
+        let task = queue
+            .lock()
+            .expect("Mutex poisoned while trying to acquire lock")
+            .pop_front();
 
         let path = match task {
             Some(l) => l,
@@ -57,20 +98,28 @@ fn worker_function(queue: Arc<Mutex<VecDeque<String>>>, template: String) {
         let cmd_final = template
             .replace("{}", &path)
             .replace("{out}", &output_filename);
-        let cmd_final_parts: Vec<&str> = cmd_final.split_whitespace().collect();
-        let program_command = cmd_final_parts[0];
 
-        // using "&" and borrowing as the compiler doesn't the size here
-        let program_arguments = &cmd_final_parts[1..];
+        let mut cmd_final_parts = cmd_final.split_whitespace();
+
+        let program_command = match cmd_final_parts.next() {
+            Some(cmd) => cmd,
+            None => {
+                eprintln!("[{}] template produced an empty command, skipping", path);
+                continue;
+            }
+        };
+
+        let program_arguments: Vec<&str> = cmd_final_parts.collect();
 
         let execution = process::Command::new(program_command)
             .args(program_arguments)
             .status();
 
         match execution {
-            Ok(s) => {
-                eprintln!("[{}] exit: {:?}", path, s.code())
-            }
+            Ok(s) => match s.code() {
+                Some(code) => eprintln!("[{}] exited code: {}", path, code),
+                None => eprintln!("[{}] terminated without exit code (signal?)", path),
+            },
             Err(e) => {
                 eprintln!("[{}] failed: {}", path, e)
             }
@@ -82,12 +131,14 @@ fn spawn_workers(
     count: usize,
     queue: Arc<Mutex<VecDeque<String>>>,
     template: String,
-    worker_function:fn(Arc<Mutex<VecDeque<String>>>, String)
+    worker_function: fn(Arc<Mutex<VecDeque<String>>>, String),
 ) -> Vec<JoinHandle<()>> {
     let mut handles = Vec::new();
     for _ in 0..count {
         let queue = Arc::clone(&queue);
+
         let template_clone = template.clone();
+
         let handle = thread::spawn(move || worker_function(queue, template_clone));
         handles.push(handle);
     }
@@ -98,16 +149,20 @@ fn spawn_workers(
 fn main() {
     let args = Args::parse();
 
-    let queue = read_inputs();
+    let queue = match read_inputs(&args.template) {
+        Ok(q) => q,
+        Err(e) => {
+            eprintln!("Failed to read input from stdin: {}", e);
+            return;
+        }
+    };
 
-    let handles = spawn_workers(args.workers, queue,args.template , worker_function);
+    let handles = spawn_workers(args.workers, queue, args.template, worker_function);
 
-    println!("j = {}" , args.workers);
+    println!("j = {}", args.workers);
 
     // Wait for all threads to finish
     for handle in handles {
         let _ = handle.join();
     }
-
-    
 }

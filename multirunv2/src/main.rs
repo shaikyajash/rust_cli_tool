@@ -1,6 +1,6 @@
-
 use std::{
-    io::{self, BufRead},process,
+    io::{self, BufRead},
+    process,
     sync::{
         Arc, Mutex,
         mpsc::{self, Receiver},
@@ -8,9 +8,7 @@ use std::{
     thread,
 };
 
-use clap::{
-    Parser,
-};
+use clap::Parser;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -39,6 +37,7 @@ impl std::fmt::Display for PoolCreationError {
 impl std::error::Error for PoolCreationError {}
 
 // for woker closure
+
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
 struct ThreadPool {
@@ -53,11 +52,8 @@ impl ThreadPool {
                 "ThreadPool size must be greater than 0".to_string(),
             ));
         }
-
         let (sender, reciever) = mpsc::channel();
-
         let receiver = Arc::new(Mutex::new(reciever));
-
         let mut workers = Vec::with_capacity(size);
 
         for id in 0..size {
@@ -65,7 +61,10 @@ impl ThreadPool {
             workers.push(element);
         }
 
-        Ok(ThreadPool { workers, sender:Some(sender) })
+        Ok(ThreadPool {
+            workers,
+            sender: Some(sender),
+        })
     }
 
     fn execute<F>(&self, worker_function: F)
@@ -73,25 +72,43 @@ impl ThreadPool {
         F: FnOnce() + Send + 'static,
     {
         let job = Box::new(worker_function);
-        self.sender.as_ref().unwrap().send(job).expect("couldn't send job to channel")
-    }
 
+        // let sender_ref = self.sender.as_ref().expect("no sender in threadpool");
+
+        // sender_ref.send(job).expect("couldn't send job to channel");
+        match &self.sender {
+            Some(sender) => {
+                if let Err(err) = sender.send(job) {
+                    eprintln!("ThreadPool: failed to send job: {}", err);
+                }
+            }
+            None => {
+                eprintln!("ThreadPool: sender is None, cannot send job");
+            }
+        }
+    }
 
 }
 
+
+
 impl Drop for ThreadPool {
+
     fn drop(&mut self) {
         drop(self.sender.take());
 
         for worker in &mut self.workers {
             println!("Shutting down worker {}", worker.id);
-            if let Some(handle) = worker.thread.take(){
-                handle.join().unwrap();
+
+            if let Some(handle) = worker.thread.take() {
+                // handle.join().unwrap();
+                if let Err(err) = handle.join() {
+                    eprintln!("Failed to join worker {}: {:?}", worker.id, err);
+                }
             }
         }
     }
 }
-
 
 struct Worker {
     id: usize,
@@ -102,7 +119,7 @@ impl Worker {
     fn new(id: usize, receiver: Arc<Mutex<Receiver<Job>>>) -> Result<Worker, PoolCreationError> {
         let handle = thread::spawn(move || {
             loop {
-                let job = receiver.lock().expect("poisoned").recv();
+                let job = receiver.lock().expect("poisoned data").recv();
                 match job {
                     Ok(job) => job(),
                     Err(_) => break,
@@ -110,7 +127,10 @@ impl Worker {
             }
         });
 
-        Ok(Worker { id, thread: Some(handle) })
+        Ok(Worker {
+            id,
+            thread: Some(handle),
+        })
     }
 }
 
@@ -139,17 +159,18 @@ pub fn sanitize_filename(index: usize) -> String {
 }
 
 //=========================================================================================
+
 fn spawn_workers(
     size: usize,
     inputs: Vec<(usize, String)>,
     template: String,
 ) -> Result<ThreadPool, PoolCreationError> {
-
     let pool = ThreadPool::new(size)?;
 
     for (index, path) in inputs {
         let template_clone = template.clone();
-        pool.execute(move || process_task(template_clone,index, path));
+
+        pool.execute(move || process_task(template_clone, index, path));
     }
 
     Ok(pool)
@@ -203,18 +224,11 @@ fn main() {
 
     println!("no. of workers = {}", args.workers);
 
-    let pool =match spawn_workers(args.workers, queue, args.template)  {
-        Ok(pool)=> pool,
-        Err(e)=>{
+    let _pool = match spawn_workers(args.workers, queue, args.template) {
+        Ok(pool) => pool,
+        Err(e) => {
             eprintln!("Failed to create thread pool: {}", e);
             return;
         }
-
     };
-
-
-
-
-
-
 }
